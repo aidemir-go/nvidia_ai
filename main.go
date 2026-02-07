@@ -29,12 +29,13 @@ type Message struct {
 
 // Структура для хранения данных пользователя
 type UserData struct {
-	MessageTimes []time.Time
-	mu           sync.Mutex
+    MessageTimes []time.Time
+    ChatHistory  []Message  
+    mu           sync.Mutex
 }
 
-const defaultModel = "nvidia/nemotron-3-nano-30b-a3b:free"
-//const defaultModel = "deepseek/deepseek-v3.2"
+const defaultModel = "arcee-ai/trinity-large-preview:free"
+//const defaultModel = "deepseek/deepseek-v3.2"  tngtech/deepseek-r1t2-chimera:free.  arcee-ai/trinity-large-preview:free
 
 // Хранилище данные юзеров
 var users = make(map[int64]*UserData)
@@ -109,26 +110,46 @@ func getAIResponse(prompt string, userID int64) (string, error) {
 		return "", fmt.Errorf("OPENROUTER_API_KEY must be set in .env")
 	}
 
-	var requestBody OpenRouterRequest
+	userData := getUserData(userID)
+	userData.mu.Lock()
+	defer userData.mu.Unlock()
 
+	// Определяем системный промпт в зависимости от пользователя
+	var systemPrompt string
 	if userID == 853329884 {
-		// Саркастичный и остроумный собеседник для себя
-		requestBody = OpenRouterRequest{
-			Model: defaultModel,
-			Messages: []Message{
-				{Role: "user", Content: prompt},
-				{Role: "system", Content: "Отвечай как интеллигентный и саркастичный собеседник, не слишком удлинняя ответ, собеседника зовут Ольга, ей 23 года, она окончила РУДН на психолога криминалиста"},
-			},
-		}
+		systemPrompt = "Отвечай как интеллигентный и саркастичный собеседник, не слишком удлинняя ответ, собеседника зовут Ханифа, ей 23 года, она окончила РУДН на психолога криминалиста"
 	} else {
-		// Краткий и по делу для всех остальных
-		requestBody = OpenRouterRequest{
-			Model: defaultModel,
-			Messages: []Message{
-				{Role: "user", Content: prompt},
-				{Role: "system", Content: "Отвечай кратко, по делу, без воды."},
-			},
-		}
+		systemPrompt = "Отвечай кратко, по делу, без воды."
+	}
+
+	// Если история пустая, добавляем системный промпт
+	if len(userData.ChatHistory) == 0 {
+		userData.ChatHistory = append(userData.ChatHistory, Message{
+			Role:    "system",
+			Content: systemPrompt,
+		})
+	}
+
+	// Добавляем сообщение пользователя в историю
+	userData.ChatHistory = append(userData.ChatHistory, Message{
+		Role:    "user",
+		Content: prompt,
+	})
+
+	// Ограничиваем историю (последние 20 сообщений + системный промпт)
+	maxHistory := 21 // system + 20 сообщений
+	if len(userData.ChatHistory) > maxHistory {
+		// Сохраняем системный промпт (первое сообщение) + последние N сообщений
+		userData.ChatHistory = append(
+			[]Message{userData.ChatHistory[0]}, 
+			userData.ChatHistory[len(userData.ChatHistory)-maxHistory+1:]...,
+		)
+	}
+
+	// Формируем запрос с полной историей
+	requestBody := OpenRouterRequest{
+		Model:    defaultModel,
+		Messages: userData.ChatHistory,
 	}
 
 	jsonData, _ := json.Marshal(requestBody)
@@ -144,10 +165,6 @@ func getAIResponse(prompt string, userID int64) (string, error) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
-	// Логируем статус и ответ
-	// log.Printf("API Status: %d", resp.StatusCode)
-	// log.Printf("API Response: %s", string(body))
 
 	var result map[string]interface{}
 	json.Unmarshal(body, &result)
@@ -177,6 +194,12 @@ func getAIResponse(prompt string, userID int64) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("no content in message")
 	}
+
+	// Добавляем ответ AI в историю
+	userData.ChatHistory = append(userData.ChatHistory, Message{
+		Role:    "assistant",
+		Content: content,
+	})
 
 	return content, nil
 }
